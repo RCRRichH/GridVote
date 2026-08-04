@@ -6,7 +6,7 @@
 <button id="start">Start Session</button>
 
 <script>
-const ws = new WebSocket("wss://l6q7vi91n0.execute-api.eu-north-1.amazonaws.com/prod?role=admin");
+const ws = new WebSocket("wss://l6q7vi91n0.execute-api.eu-north-1.amazonaws.com/prod");
 
 document.getElementById("start").onclick = () => {
   ws.send(JSON.stringify({ action: "startSession" }));

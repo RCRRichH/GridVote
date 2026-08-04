@@ -41,7 +41,7 @@ const log = (msg) => {
   box.innerText += "\n" + msg;
 };
 
-const ws = new WebSocket("wss://l6q7vi91n0.execute-api.eu-north-1.amazonaws.com/prod?role=admin");
+const ws = new WebSocket("wss://l6q7vi91n0.execute-api.eu-north-1.amazonaws.com/prod");
 
 ws.onopen = () => {
   log("Connected as admin.");

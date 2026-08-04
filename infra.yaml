@@ -82,8 +82,18 @@ Resources:
       Role: !GetAtt LambdaRole.Arn
       Code:
         ZipFile: |
+          const AWS = require("aws-sdk");
+          const ddb = new AWS.DynamoDB.DocumentClient();
+
           exports.handler = async (event) => {
-            console.log("Connected:", event.requestContext.connectionId);
+            const connectionId = event.requestContext.connectionId;
+
+            await ddb.put({
+              TableName: "Connections",
+              Item: { connectionId }
+            }).promise();
+
+            console.log("Connected:", connectionId);
             return { statusCode: 200 };
           };
 
@@ -95,8 +105,18 @@ Resources:
       Role: !GetAtt LambdaRole.Arn
       Code:
         ZipFile: |
+          const AWS = require("aws-sdk");
+          const ddb = new AWS.DynamoDB.DocumentClient();
+
           exports.handler = async (event) => {
-            console.log("Disconnected:", event.requestContext.connectionId);
+            const connectionId = event.requestContext.connectionId;
+
+            await ddb.delete({
+              TableName: "Connections",
+              Key: { connectionId }
+            }).promise();
+
+            console.log("Disconnected:", connectionId);
             return { statusCode: 200 };
           };
 
@@ -108,11 +128,43 @@ Resources:
       Role: !GetAtt LambdaRole.Arn
       Environment:
         Variables:
-          WS_ENDPOINT: !Sub "wss://${WebSocketApi}.execute-api.${AWS::Region}.amazonaws.com/prod"
+          WS_ENDPOINT: !Sub "${WebSocketApi}.execute-api.${AWS::Region}.amazonaws.com/prod"
       Code:
         ZipFile: |
+          const AWS = require("aws-sdk");
+          const ddb = new AWS.DynamoDB.DocumentClient();
+
           exports.handler = async (event) => {
-            console.log("Start session");
+            console.log("Start session triggered");
+
+            const tracksData = await ddb.scan({ TableName: "Tracks" }).promise();
+            const tracks = tracksData.Items.map(t => t.trackName);
+            const selected = tracks.sort(() => 0.5 - Math.random()).slice(0, 3);
+
+            const connections = await ddb.scan({ TableName: "Connections" }).promise();
+
+            const apigw = new AWS.ApiGatewayManagementApi({
+              endpoint: process.env.WS_ENDPOINT
+            });
+
+            const message = {
+              type: "sessionStarted",
+              tracks: selected
+            };
+
+            const postCalls = connections.Items.map(async ({ connectionId }) => {
+              try {
+                await apigw.postToConnection({
+                  ConnectionId: connectionId,
+                  Data: JSON.stringify(message)
+                }).promise();
+              } catch (err) {
+                console.log("Failed to send to", connectionId, err);
+              }
+            });
+
+            await Promise.all(postCalls);
+
             return { statusCode: 200 };
           };
 
@@ -122,10 +174,27 @@ Resources:
       Handler: index.handler
       Runtime: nodejs18.x
       Role: !GetAtt LambdaRole.Arn
+      Environment:
+        Variables:
+          WS_ENDPOINT: !Sub "${WebSocketApi}.execute-api.${AWS::Region}.amazonaws.com/prod"
       Code:
         ZipFile: |
+          const AWS = require("aws-sdk");
+          const ddb = new AWS.DynamoDB.DocumentClient();
+
           exports.handler = async (event) => {
-            console.log("Vote received");
+            const body = JSON.parse(event.body);
+            const track = body.track;
+
+            await ddb.update({
+              TableName: "Sessions",
+              Key: { sessionId: "current" },
+              UpdateExpression: "ADD votes.#t :inc",
+              ExpressionAttributeNames: { "#t": track },
+              ExpressionAttributeValues: { ":inc": 1 }
+            }).promise();
+
+            console.log("Vote received:", track);
             return { statusCode: 200 };
           };
 
@@ -137,11 +206,49 @@ Resources:
       Role: !GetAtt LambdaRole.Arn
       Environment:
         Variables:
-          WS_ENDPOINT: !Sub "wss://${WebSocketApi}.execute-api.${AWS::Region}.amazonaws.com/prod"
+          WS_ENDPOINT: !Sub "${WebSocketApi}.execute-api.${AWS::Region}.amazonaws.com/prod"
       Code:
         ZipFile: |
+          const AWS = require("aws-sdk");
+          const ddb = new AWS.DynamoDB.DocumentClient();
+
           exports.handler = async (event) => {
             console.log("End session");
+
+            const session = await ddb.get({
+              TableName: "Sessions",
+              Key: { sessionId: "current" }
+            }).promise();
+
+            const votes = session.Item?.votes || {};
+
+            const winner = Object.entries(votes)
+              .sort((a, b) => b[1] - a[1])[0]?.[0] || "No votes";
+
+            const connections = await ddb.scan({ TableName: "Connections" }).promise();
+
+            const apigw = new AWS.ApiGatewayManagementApi({
+              endpoint: process.env.WS_ENDPOINT
+            });
+
+            const message = {
+              type: "sessionEnded",
+              winner
+            };
+
+            const postCalls = connections.Items.map(async ({ connectionId }) => {
+              try {
+                await apigw.postToConnection({
+                  ConnectionId: connectionId,
+                  Data: JSON.stringify(message)
+                }).promise();
+              } catch (err) {
+                console.log("Failed to send to", connectionId, err);
+              }
+            });
+
+            await Promise.all(postCalls);
+
             return { statusCode: 200 };
           };
 
@@ -185,7 +292,6 @@ Resources:
     Properties:
       ApiId: !Ref WebSocketApi
       IntegrationType: MOCK
-      PayloadFormatVersion: "1.0"
 
   ConnectRoute:
     Type: AWS::ApiGatewayV2::Route
@@ -228,10 +334,6 @@ Resources:
       ApiId: !Ref WebSocketApi
       RouteKey: "$default"
       Target: !Sub "integrations/${DefaultIntegration}"
-
-  # -----------------------------
-  # LAMBDA PERMISSIONS (required)
-  # -----------------------------
 
   OnConnectLambdaPermission:
     Type: AWS::Lambda::Permission

@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html>
+<body>
+<h1>GridVote Admin</h1>
+
+<button id="start">Start Session</button>
+
+<script>
+const ws = new WebSocket("wss://l6q7vi91n0.execute-api.eu-north-1.amazonaws.com/prod?role=admin");
+
+document.getElementById("start").onclick = () => {
+  ws.send(JSON.stringify({ action: "startSession" }));
+};
+
+ws.onmessage = (msg) => {
+  const data = JSON.parse(msg.data);
+
+  if (data.type === "newSession") {
+    console.log("New session started:", data);
+  }
+
+  if (data.type === "countdownStart") {
+    console.log("Countdown started:", data.duration);
+  }
+
+  if (data.type === "sessionEnded") {
+    console.log("Winner:", data.winner);
+  }
+};
+</script>
+</body>
+</html>

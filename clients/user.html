@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html>
+<body>
+<script>
+const ws = new WebSocket("wss://l6q7vi91n0.execute-api.eu-north-1.amazonaws.com/prod");
+
+ws.onmessage = (msg) => {
+  const data = JSON.parse(msg.data);
+
+  if (data.type === "newSession") {
+    document.body.innerHTML = "";
+    window.currentSession = data.sessionId;
+
+    data.tracks.forEach(track => {
+      const btn = document.createElement("button");
+      btn.innerText = track;
+      btn.onclick = () => ws.send(JSON.stringify({
+        action: "vote",
+        track,
+        sessionId: window.currentSession
+      }));
+      document.body.appendChild(btn);
+    });
+  }
+
+  if (data.type === "countdownStart") {
+    let remaining = data.duration;
+    const timer = document.createElement("div");
+    timer.style.fontSize = "2rem";
+    timer.style.marginTop = "20px";
+    document.body.appendChild(timer);
+
+    const interval = setInterval(() => {
+      timer.innerText = `Time left: ${remaining}s`;
+      remaining--;
+
+      if (remaining < 0) {
+        clearInterval(interval);
+        timer.innerText = "Voting closed";
+        document.querySelectorAll("button").forEach(btn => btn.disabled = true);
+      }
+    }, 1000);
+  }
+
+  if (data.type === "sessionEnded") {
+    const result = document.createElement("h2");
+    result.innerText = `Winner: ${data.winner}`;
+    document.body.appendChild(result);
+  }
+};
+</script>
+</body>
+</html>

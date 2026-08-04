@@ -8,6 +8,19 @@ Parameters:
 
 Resources:
 
+      DefaultRoute:
+  Type: AWS::ApiGatewayV2::Route
+  Properties:
+    ApiId: !Ref WebSocketApi
+    RouteKey: "$default"
+    Target: !Sub "integrations/${DefaultIntegration}"
+
+DefaultIntegration:
+  Type: AWS::ApiGatewayV2::Integration
+  Properties:
+    ApiId: !Ref WebSocketApi
+    IntegrationType: MOCK
+
   ############################################
   # DynamoDB Tables
   ############################################
@@ -412,19 +425,6 @@ Resources:
       IntegrationType: AWS_PROXY
       IntegrationUri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${VoteFunction.Arn}/invocations"
       
-      DefaultRoute:
-  Type: AWS::ApiGatewayV2::Route
-  Properties:
-    ApiId: !Ref WebSocketApi
-    RouteKey: "$default"
-    Target: !Sub "integrations/${DefaultIntegration}"
-
-DefaultIntegration:
-  Type: AWS::ApiGatewayV2::Integration
-  Properties:
-    ApiId: !Ref WebSocketApi
-    IntegrationType: MOCK
-
 
   ############################################
   # Lambda Permissions

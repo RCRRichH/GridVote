@@ -1,0 +1,457 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: GridVote Minimal WebSocket Voting App
+
+Parameters:
+  StageName:
+    Type: String
+    Default: prod
+
+Resources:
+
+  ############################################
+  # DynamoDB Tables
+  ############################################
+
+  ConnectionsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: Connections
+      AttributeDefinitions:
+        - AttributeName: connectionId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: connectionId
+          KeyType: HASH
+      BillingMode: PAY_PER_REQUEST
+
+  SessionsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: Sessions
+      AttributeDefinitions:
+        - AttributeName: sessionId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: sessionId
+          KeyType: HASH
+      BillingMode: PAY_PER_REQUEST
+
+  TracksTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: Tracks
+      AttributeDefinitions:
+        - AttributeName: trackName
+          AttributeType: S
+      KeySchema:
+        - AttributeName: trackName
+          KeyType: HASH
+      BillingMode: PAY_PER_REQUEST
+
+  ############################################
+  # IAM Roles
+  ############################################
+
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: GridVoteLambdaRole
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: GridVoteLambdaPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:GetItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:Scan
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - execute-api:ManageConnections
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: "*"
+
+  SchedulerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: GridVoteSchedulerRole
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: scheduler.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: GridVoteSchedulerPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                Resource: "*"
+
+  ############################################
+  # Lambda Functions
+  ############################################
+
+  OnConnectFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: GridVoteOnConnect
+      Handler: index.handler
+      Runtime: nodejs18.x
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Code:
+        ZipFile: |
+          const AWS = require("aws-sdk");
+          const db = new AWS.DynamoDB.DocumentClient();
+
+          exports.handler = async (event) => {
+            const connectionId = event.requestContext.connectionId;
+            const role = event.queryStringParameters?.role || "user";
+
+            await db.put({
+              TableName: "Connections",
+              Item: { connectionId, role }
+            }).promise();
+
+            return { statusCode: 200 };
+          };
+
+  OnDisconnectFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: GridVoteOnDisconnect
+      Handler: index.handler
+      Runtime: nodejs18.x
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Code:
+        ZipFile: |
+          const AWS = require("aws-sdk");
+          const db = new AWS.DynamoDB.DocumentClient();
+
+          exports.handler = async (event) => {
+            const connectionId = event.requestContext.connectionId;
+
+            await db.delete({
+              TableName: "Connections",
+              Key: { connectionId }
+            }).promise();
+
+            return { statusCode: 200 };
+          };
+
+  StartSessionFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: GridVoteStartSession
+      Handler: index.handler
+      Runtime: nodejs18.x
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Environment:
+        Variables:
+          WS_ENDPOINT: !Sub "${WebSocketApi}.execute-api.${AWS::Region}.amazonaws.com/${StageName}"
+          END_SESSION_ARN: !GetAtt EndSessionFunction.Arn
+          SCHEDULER_ROLE_ARN: !GetAtt SchedulerRole.Arn
+      Code:
+        ZipFile: |
+          const AWS = require("aws-sdk");
+          const db = new AWS.DynamoDB.DocumentClient();
+          const api = new AWS.ApiGatewayManagementApi({
+            endpoint: process.env.WS_ENDPOINT
+          });
+          const scheduler = new AWS.Scheduler();
+
+          exports.handler = async () => {
+            const tracks = await db.scan({ TableName: "Tracks" }).promise();
+            const available = tracks.Items.filter(t => !t.disabledUntil || t.disabledUntil < Date.now());
+
+            const selected = available.sort(() => 0.5 - Math.random()).slice(0, 3);
+            const sessionId = Date.now().toString();
+
+            await db.put({
+              TableName: "Sessions",
+              Item: {
+                sessionId,
+                tracks: selected.map(t => t.trackName),
+                votes: {}
+              }
+            }).promise();
+
+            const connections = await db.scan({ TableName: "Connections" }).promise();
+
+            const newSessionPayload = {
+              type: "newSession",
+              sessionId,
+              tracks: selected.map(t => t.trackName)
+            };
+
+            const countdownPayload = {
+              type: "countdownStart",
+              duration: 10,
+              sessionId
+            };
+
+            for (const c of connections.Items) {
+              await api.postToConnection({
+                ConnectionId: c.connectionId,
+                Data: JSON.stringify(newSessionPayload)
+              }).promise().catch(() => {});
+
+              await api.postToConnection({
+                ConnectionId: c.connectionId,
+                Data: JSON.stringify(countdownPayload)
+              }).promise().catch(() => {});
+            }
+
+            await scheduler.createSchedule({
+              Name: `endSession-${sessionId}`,
+              ScheduleExpression: "at(" + new Date(Date.now() + 10000).toISOString() + ")",
+              FlexibleTimeWindow: { Mode: "OFF" },
+              Target: {
+                Arn: process.env.END_SESSION_ARN,
+                RoleArn: process.env.SCHEDULER_ROLE_ARN,
+                Input: JSON.stringify({ sessionId })
+              }
+            }).promise();
+
+            return { statusCode: 200 };
+          };
+
+  VoteFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: GridVoteVote
+      Handler: index.handler
+      Runtime: nodejs18.x
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Code:
+        ZipFile: |
+          const AWS = require("aws-sdk");
+          const db = new AWS.DynamoDB.DocumentClient();
+
+          exports.handler = async (event) => {
+            const body = JSON.parse(event.body);
+            const track = body.track;
+
+            const session = await db.get({
+              TableName: "Sessions",
+              Key: { sessionId: body.sessionId }
+            }).promise();
+
+            session.Item.votes[track] = (session.Item.votes[track] || 0) + 1;
+
+            await db.put({
+              TableName: "Sessions",
+              Item: session.Item
+            }).promise();
+
+            return { statusCode: 200 };
+          };
+
+  EndSessionFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: GridVoteEndSession
+      Handler: index.handler
+      Runtime: nodejs18.x
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Environment:
+        Variables:
+          WS_ENDPOINT: !Sub "${WebSocketApi}.execute-api.${AWS::Region}.amazonaws.com/${StageName}"
+      Code:
+        ZipFile: |
+          const AWS = require("aws-sdk");
+          const db = new AWS.DynamoDB.DocumentClient();
+          const api = new AWS.ApiGatewayManagementApi({
+            endpoint: process.env.WS_ENDPOINT
+          });
+
+          exports.handler = async (event) => {
+            const sessionId = event.sessionId;
+
+            const session = await db.get({
+              TableName: "Sessions",
+              Key: { sessionId }
+            }).promise();
+
+            const votes = session.Item.votes;
+            const tracks = session.Item.tracks;
+
+            let winner = null;
+            let maxVotes = -1;
+
+            tracks.forEach(track => {
+              const count = votes[track] || 0;
+              if (count > maxVotes) {
+                winner = track;
+                maxVotes = count;
+              }
+            });
+
+            const topTracks = tracks.filter(t => (votes[t] || 0) === maxVotes);
+            if (topTracks.length > 1) {
+              winner = topTracks[Math.floor(Math.random() * topTracks.length)];
+            }
+
+            await db.update({
+              TableName: "Tracks",
+              Key: { trackName: winner },
+              UpdateExpression: "SET disabledUntil = :ts",
+              ExpressionAttributeValues: {
+                ":ts": Date.now() + 10 * 60 * 1000
+              }
+            }).promise();
+
+            const connections = await db.scan({ TableName: "Connections" }).promise();
+
+            const payload = {
+              type: "sessionEnded",
+              sessionId,
+              winner
+            };
+
+            for (const c of connections.Items) {
+              await api.postToConnection({
+                ConnectionId: c.connectionId,
+                Data: JSON.stringify(payload)
+              }).promise().catch(() => {});
+            }
+
+            return { statusCode: 200 };
+          };
+
+  ############################################
+  # WebSocket API
+  ############################################
+
+  WebSocketApi:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: GridVoteWebSocket
+      ProtocolType: WEBSOCKET
+      RouteSelectionExpression: "$request.body.action"
+
+  WebSocketStage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      ApiId: !Ref WebSocketApi
+      StageName: !Ref StageName
+      AutoDeploy: true
+
+  ConnectRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref WebSocketApi
+      RouteKey: "$connect"
+      Target: !Sub "integrations/${ConnectIntegration}"
+
+  ConnectIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref WebSocketApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${OnConnectFunction.Arn}/invocations"
+
+  DisconnectRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref WebSocketApi
+      RouteKey: "$disconnect"
+      Target: !Sub "integrations/${DisconnectIntegration}"
+
+  DisconnectIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref WebSocketApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${OnDisconnectFunction.Arn}/invocations"
+
+  StartSessionRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref WebSocketApi
+      RouteKey: "startSession"
+      Target: !Sub "integrations/${StartSessionIntegration}"
+
+  StartSessionIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref WebSocketApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${StartSessionFunction.Arn}/invocations"
+
+  VoteRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref WebSocketApi
+      RouteKey: "vote"
+      Target: !Sub "integrations/${VoteIntegration}"
+
+  VoteIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref WebSocketApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${VoteFunction.Arn}/invocations"
+
+  ############################################
+  # Lambda Permissions
+  ############################################
+
+  PermissionConnect:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref OnConnectFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+
+  PermissionDisconnect:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref OnDisconnectFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+
+  PermissionStartSession:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref StartSessionFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+
+  PermissionVote:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref VoteFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+
+  PermissionEndSession:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref EndSessionFunction
+      Action: lambda:InvokeFunction
+      Principal: scheduler.amazonaws.com
+
+Outputs:
+  WebSocketURL:
+    Description: WebSocket URL
+    Value: !Sub "wss://${WebSocketApi}.execute-api.${AWS::Region}.amazonaws.com/${StageName}"

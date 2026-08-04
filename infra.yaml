@@ -16,6 +16,28 @@ Resources:
       StageName: prod
       AutoDeploy: true
 
+  LambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: GridVotePolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:*
+                  - execute-api:ManageConnections
+                  - lambda:InvokeFunction
+                Resource: "*"
+
   ConnectionsTable:
     Type: AWS::DynamoDB::Table
     Properties:
@@ -59,8 +81,11 @@ Resources:
       Runtime: nodejs18.x
       Role: !GetAtt LambdaRole.Arn
       Code:
-        S3Bucket: placeholder-bucket
-        S3Key: placeholder-key
+        ZipFile: |
+          exports.handler = async (event) => {
+            console.log("Connected:", event.requestContext.connectionId);
+            return { statusCode: 200 };
+          };
 
   OnDisconnectLambda:
     Type: AWS::Lambda::Function
@@ -69,8 +94,11 @@ Resources:
       Runtime: nodejs18.x
       Role: !GetAtt LambdaRole.Arn
       Code:
-        S3Bucket: placeholder-bucket
-        S3Key: placeholder-key
+        ZipFile: |
+          exports.handler = async (event) => {
+            console.log("Disconnected:", event.requestContext.connectionId);
+            return { statusCode: 200 };
+          };
 
   StartSessionLambda:
     Type: AWS::Lambda::Function
@@ -80,10 +108,13 @@ Resources:
       Role: !GetAtt LambdaRole.Arn
       Environment:
         Variables:
-          WS_ENDPOINT: !Sub "${WebSocketApi}.execute-api.${AWS::Region}.amazonaws.com/prod"
+          WS_ENDPOINT: !Sub "wss://${WebSocketApi}.execute-api.${AWS::Region}.amazonaws.com/prod"
       Code:
-        S3Bucket: placeholder-bucket
-        S3Key: placeholder-key
+        ZipFile: |
+          exports.handler = async (event) => {
+            console.log("Start session");
+            return { statusCode: 200 };
+          };
 
   VoteLambda:
     Type: AWS::Lambda::Function
@@ -92,8 +123,11 @@ Resources:
       Runtime: nodejs18.x
       Role: !GetAtt LambdaRole.Arn
       Code:
-        S3Bucket: placeholder-bucket
-        S3Key: placeholder-key
+        ZipFile: |
+          exports.handler = async (event) => {
+            console.log("Vote received");
+            return { statusCode: 200 };
+          };
 
   EndSessionLambda:
     Type: AWS::Lambda::Function
@@ -103,31 +137,13 @@ Resources:
       Role: !GetAtt LambdaRole.Arn
       Environment:
         Variables:
-          WS_ENDPOINT: !Sub "${WebSocketApi}.execute-api.${AWS::Region}.amazonaws.com/prod"
+          WS_ENDPOINT: !Sub "wss://${WebSocketApi}.execute-api.${AWS::Region}.amazonaws.com/prod"
       Code:
-        S3Bucket: placeholder-bucket
-        S3Key: placeholder-key
-
-  LambdaRole:
-    Type: AWS::IAM::Role
-    Properties:
-      AssumeRolePolicyDocument:
-        Version: "2012-10-17"
-        Statement:
-          - Effect: Allow
-            Principal:
-              Service: lambda.amazonaws.com
-            Action: sts:AssumeRole
-      Policies:
-        - PolicyName: GridVotePolicy
-          PolicyDocument:
-            Version: "2012-10-17"
-            Statement:
-              - Effect: Allow
-                Action:
-                  - dynamodb:*
-                  - execute-api:ManageConnections
-                Resource: "*"
+        ZipFile: |
+          exports.handler = async (event) => {
+            console.log("End session");
+            return { statusCode: 200 };
+          };
 
   ConnectIntegration:
     Type: AWS::ApiGatewayV2::Integration
@@ -164,6 +180,13 @@ Resources:
       IntegrationType: AWS_PROXY
       IntegrationUri: !GetAtt EndSessionLambda.Arn
 
+  DefaultIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref WebSocketApi
+      IntegrationType: MOCK
+      PayloadFormatVersion: "1.0"
+
   ConnectRoute:
     Type: AWS::ApiGatewayV2::Route
     Properties:
@@ -192,11 +215,12 @@ Resources:
       RouteKey: "vote"
       Target: !Sub "integrations/${VoteIntegration}"
 
-  DefaultIntegration:
-    Type: AWS::ApiGatewayV2::Integration
+  EndSessionRoute:
+    Type: AWS::ApiGatewayV2::Route
     Properties:
       ApiId: !Ref WebSocketApi
-      IntegrationType: MOCK
+      RouteKey: "endSession"
+      Target: !Sub "integrations/${EndSessionIntegration}"
 
   DefaultRoute:
     Type: AWS::ApiGatewayV2::Route

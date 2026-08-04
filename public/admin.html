@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>GridVote Admin</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      padding: 20px;
+      text-align: center;
+    }
+    button {
+      padding: 15px 25px;
+      font-size: 1.2rem;
+      margin-top: 20px;
+    }
+    #log {
+      margin-top: 30px;
+      text-align: left;
+      max-width: 600px;
+      margin-left: auto;
+      margin-right: auto;
+      background: #f2f2f2;
+      padding: 15px;
+      border-radius: 8px;
+      font-family: monospace;
+      white-space: pre-wrap;
+    }
+  </style>
+</head>
+<body>
+
+<h1>GridVote Admin</h1>
+<button id="start">Start New Voting Session</button>
+
+<div id="log">Connecting…</div>
+
+<script>
+const log = (msg) => {
+  const box = document.getElementById("log");
+  box.innerText += "\n" + msg;
+};
+
+const ws = new WebSocket("wss://l6q7vi91n0.execute-api.eu-north-1.amazonaws.com/prod?role=admin");
+
+ws.onopen = () => {
+  log("Connected as admin.");
+};
+
+ws.onerror = (err) => {
+  log("WebSocket error: " + err);
+};
+
+document.getElementById("start").onclick = () => {
+  ws.send(JSON.stringify({ action: "startSession" }));
+  log("Sent: startSession");
+};
+
+ws.onmessage = (msg) => {
+  const data = JSON.parse(msg.data);
+
+  if (data.type === "newSession") {
+    log(`New session started: ${data.sessionId}`);
+    log(`Tracks: ${data.tracks.join(", ")}`);
+  }
+
+  if (data.type === "countdownStart") {
+    log(`Countdown started: ${data.duration}s`);
+  }
+
+  if (data.type === "sessionEnded") {
+    log(`Session ended. Winner: ${data.winner}`);
+  }
+};
+</script>
+
+</body>
+</html>

@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>GridVote</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      padding: 20px;
+      text-align: center;
+    }
+    button {
+      display: block;
+      margin: 10px auto;
+      padding: 15px 25px;
+      font-size: 1.2rem;
+    }
+    #timer {
+      font-size: 2rem;
+      margin-top: 20px;
+    }
+  </style>
+</head>
+<body>
+
+<h1>GridVote</h1>
+<p>Waiting for session…</p>
+
+<script>
+const ws = new WebSocket("wss://l6q7vi91n0.execute-api.eu-north-1.amazonaws.com/prod");
+
+ws.onmessage = (msg) => {
+  const data = JSON.parse(msg.data);
+
+  // New voting session
+  if (data.type === "newSession") {
+    document.body.innerHTML = "<h1>Vote for the next track</h1>";
+    window.currentSession = data.sessionId;
+
+    data.tracks.forEach(track => {
+      const btn = document.createElement("button");
+      btn.innerText = track;
+      btn.onclick = () => ws.send(JSON.stringify({
+        action: "vote",
+        track,
+        sessionId: window.currentSession
+      }));
+      document.body.appendChild(btn);
+    });
+  }
+
+  // Countdown timer
+  if (data.type === "countdownStart") {
+    let remaining = data.duration;
+    const timer = document.createElement("div");
+    timer.id = "timer";
+    document.body.appendChild(timer);
+
+    const interval = setInterval(() => {
+      timer.innerText = `Time left: ${remaining}s`;
+      remaining--;
+
+      if (remaining < 0) {
+        clearInterval(interval);
+        timer.innerText = "Voting closed";
+        document.querySelectorAll("button").forEach(btn => btn.disabled = true);
+      }
+    }, 1000);
+  }
+
+  // Session ended — show winner
+  if (data.type === "sessionEnded") {
+    const result = document.createElement("h2");
+    result.innerText = `Winner: ${data.winner}`;
+    document.body.appendChild(result);
+  }
+};
+</script>
+
+</body>
+</html>

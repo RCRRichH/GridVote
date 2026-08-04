@@ -1,14 +1,256 @@
-AWSTemplateFormatVersion: 2010-09-09
-Description: GridVote WebSocket API + Lambdas + DynamoDB
+AWSTemplateFormatVersion: '2010-09-09'
+Description: GridVote WebSocket backend + static hosting
+
+Parameters:
+  CodeBucket:
+    Type: String
+    Description: S3 bucket containing backend code zip
+  CodeKey:
+    Type: String
+    Description: Key of backend zip file (e.g., gridvote-backend.zip)
 
 Resources:
 
+  ###############################################
+  # IAM ROLE FOR ALL LAMBDAS
+  ###############################################
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: gridvote-lambda-execution-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+
+  ###############################################
+  # WEBSOCKET API
+  ###############################################
   WebSocketApi:
     Type: AWS::ApiGatewayV2::Api
     Properties:
+      Name: GridVoteWebSocketApi
       ProtocolType: WEBSOCKET
       RouteSelectionExpression: "$request.body.action"
 
+  ###############################################
+  # LAMBDAS
+  ###############################################
+  OnConnectLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: gridvote-OnConnectLambda
+      Handler: onconnect.handler
+      Runtime: nodejs18.x
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Code:
+        S3Bucket: !Ref CodeBucket
+        S3Key: !Ref CodeKey
+
+  OnDisconnectLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: gridvote-OnDisconnectLambda
+      Handler: ondisconnect.handler
+      Runtime: nodejs18.x
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Code:
+        S3Bucket: !Ref CodeBucket
+        S3Key: !Ref CodeKey
+
+  DefaultLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: gridvote-DefaultLambda
+      Handler: default.handler
+      Runtime: nodejs18.x
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Code:
+        S3Bucket: !Ref CodeBucket
+        S3Key: !Ref CodeKey
+
+  StartSessionLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: gridvote-StartSessionLambda
+      Handler: start_session.handler
+      Runtime: nodejs18.x
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Code:
+        S3Bucket: !Ref CodeBucket
+        S3Key: !Ref CodeKey
+
+  VoteLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: gridvote-VoteLambda
+      Handler: vote.handler
+      Runtime: nodejs18.x
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Code:
+        S3Bucket: !Ref CodeBucket
+        S3Key: !Ref CodeKey
+
+  EndSessionLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: gridvote-EndSessionLambda
+      Handler: end_session.handler
+      Runtime: nodejs18.x
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Code:
+        S3Bucket: !Ref CodeBucket
+        S3Key: !Ref CodeKey
+
+  ###############################################
+  # INTEGRATIONS
+  ###############################################
+  ConnectIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref WebSocketApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${OnConnectLambda.Arn}/invocations
+
+  DisconnectIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref WebSocketApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${OnDisconnectLambda.Arn}/invocations
+
+  DefaultIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref WebSocketApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${DefaultLambda.Arn}/invocations
+
+  StartSessionIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref WebSocketApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${StartSessionLambda.Arn}/invocations
+
+  VoteIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref WebSocketApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${VoteLambda.Arn}/invocations
+
+  EndSessionIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref WebSocketApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${EndSessionLambda.Arn}/invocations
+
+  ###############################################
+  # ROUTES
+  ###############################################
+  ConnectRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref WebSocketApi
+      RouteKey: $connect
+      Target: !Sub integrations/${ConnectIntegration}
+
+  DisconnectRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref WebSocketApi
+      RouteKey: $disconnect
+      Target: !Sub integrations/${DisconnectIntegration}
+
+  DefaultRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref WebSocketApi
+      RouteKey: $default
+      Target: !Sub integrations/${DefaultIntegration}
+
+  StartSessionRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref WebSocketApi
+      RouteKey: startSession
+      Target: !Sub integrations/${StartSessionIntegration}
+
+  VoteRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref WebSocketApi
+      RouteKey: vote
+      Target: !Sub integrations/${VoteIntegration}
+
+  EndSessionRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref WebSocketApi
+      RouteKey: endSession
+      Target: !Sub integrations/${EndSessionIntegration}
+
+  ###############################################
+  # PERMISSIONS
+  ###############################################
+  ConnectPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref OnConnectLambda
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${WebSocketApi}/*/$connect
+
+  DisconnectPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref OnDisconnectLambda
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${WebSocketApi}/*/$disconnect
+
+  DefaultPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref DefaultLambda
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${WebSocketApi}/*/$default
+
+  StartSessionPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref StartSessionLambda
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${WebSocketApi}/*/startSession
+
+  VotePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref VoteLambda
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${WebSocketApi}/*/vote
+
+  EndSessionPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref EndSessionLambda
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${WebSocketApi}/*/endSession
+
+  ###############################################
+  # STAGE
+  ###############################################
   WebSocketStage:
     Type: AWS::ApiGatewayV2::Stage
     Properties:
@@ -16,366 +258,7 @@ Resources:
       StageName: prod
       AutoDeploy: true
 
-  LambdaRole:
-    Type: AWS::IAM::Role
-    Properties:
-      AssumeRolePolicyDocument:
-        Version: "2012-10-17"
-        Statement:
-          - Effect: Allow
-            Principal:
-              Service: lambda.amazonaws.com
-            Action: sts:AssumeRole
-      Policies:
-        - PolicyName: GridVotePolicy
-          PolicyDocument:
-            Version: "2012-10-17"
-            Statement:
-              - Effect: Allow
-                Action:
-                  - dynamodb:*
-                  - execute-api:ManageConnections
-                  - lambda:InvokeFunction
-                Resource: "*"
-
-  ConnectionsTable:
-    Type: AWS::DynamoDB::Table
-    Properties:
-      AttributeDefinitions:
-        - AttributeName: connectionId
-          AttributeType: S
-      KeySchema:
-        - AttributeName: connectionId
-          KeyType: HASH
-      BillingMode: PAY_PER_REQUEST
-      TableName: Connections
-
-  TracksTable:
-    Type: AWS::DynamoDB::Table
-    Properties:
-      AttributeDefinitions:
-        - AttributeName: trackName
-          AttributeType: S
-      KeySchema:
-        - AttributeName: trackName
-          KeyType: HASH
-      BillingMode: PAY_PER_REQUEST
-      TableName: Tracks
-
-  SessionsTable:
-    Type: AWS::DynamoDB::Table
-    Properties:
-      AttributeDefinitions:
-        - AttributeName: sessionId
-          AttributeType: S
-      KeySchema:
-        - AttributeName: sessionId
-          KeyType: HASH
-      BillingMode: PAY_PER_REQUEST
-      TableName: Sessions
-
-  OnConnectLambda:
-    Type: AWS::Lambda::Function
-    Properties:
-      Handler: index.handler
-      Runtime: nodejs18.x
-      Role: !GetAtt LambdaRole.Arn
-      Code:
-        ZipFile: |
-          const AWS = require("aws-sdk");
-          const ddb = new AWS.DynamoDB.DocumentClient();
-
-          exports.handler = async (event) => {
-            const connectionId = event.requestContext.connectionId;
-
-            await ddb.put({
-              TableName: "Connections",
-              Item: { connectionId }
-            }).promise();
-
-            console.log("Connected:", connectionId);
-            return { statusCode: 200 };
-          };
-
-  OnDisconnectLambda:
-    Type: AWS::Lambda::Function
-    Properties:
-      Handler: index.handler
-      Runtime: nodejs18.x
-      Role: !GetAtt LambdaRole.Arn
-      Code:
-        ZipFile: |
-          const AWS = require("aws-sdk");
-          const ddb = new AWS.DynamoDB.DocumentClient();
-
-          exports.handler = async (event) => {
-            const connectionId = event.requestContext.connectionId;
-
-            await ddb.delete({
-              TableName: "Connections",
-              Key: { connectionId }
-            }).promise();
-
-            console.log("Disconnected:", connectionId);
-            return { statusCode: 200 };
-          };
-
-  StartSessionLambda:
-    Type: AWS::Lambda::Function
-    Properties:
-      Handler: index.handler
-      Runtime: nodejs18.x
-      Role: !GetAtt LambdaRole.Arn
-      Environment:
-        Variables:
-          WS_ENDPOINT: !Sub "${WebSocketApi}.execute-api.${AWS::Region}.amazonaws.com/prod"
-      Code:
-        ZipFile: |
-          const AWS = require("aws-sdk");
-          const ddb = new AWS.DynamoDB.DocumentClient();
-
-          exports.handler = async (event) => {
-            console.log("Start session triggered");
-
-            const tracksData = await ddb.scan({ TableName: "Tracks" }).promise();
-            const tracks = tracksData.Items.map(t => t.trackName);
-            const selected = tracks.sort(() => 0.5 - Math.random()).slice(0, 3);
-
-            const connections = await ddb.scan({ TableName: "Connections" }).promise();
-
-            const apigw = new AWS.ApiGatewayManagementApi({
-              endpoint: process.env.WS_ENDPOINT
-            });
-
-            const message = {
-              type: "sessionStarted",
-              tracks: selected
-            };
-
-            const postCalls = connections.Items.map(async ({ connectionId }) => {
-              try {
-                await apigw.postToConnection({
-                  ConnectionId: connectionId,
-                  Data: JSON.stringify(message)
-                }).promise();
-              } catch (err) {
-                console.log("Failed to send to", connectionId, err);
-              }
-            });
-
-            await Promise.all(postCalls);
-
-            return { statusCode: 200 };
-          };
-
-  VoteLambda:
-    Type: AWS::Lambda::Function
-    Properties:
-      Handler: index.handler
-      Runtime: nodejs18.x
-      Role: !GetAtt LambdaRole.Arn
-      Environment:
-        Variables:
-          WS_ENDPOINT: !Sub "${WebSocketApi}.execute-api.${AWS::Region}.amazonaws.com/prod"
-      Code:
-        ZipFile: |
-          const AWS = require("aws-sdk");
-          const ddb = new AWS.DynamoDB.DocumentClient();
-
-          exports.handler = async (event) => {
-            const body = JSON.parse(event.body);
-            const track = body.track;
-
-            await ddb.update({
-              TableName: "Sessions",
-              Key: { sessionId: "current" },
-              UpdateExpression: "ADD votes.#t :inc",
-              ExpressionAttributeNames: { "#t": track },
-              ExpressionAttributeValues: { ":inc": 1 }
-            }).promise();
-
-            console.log("Vote received:", track);
-            return { statusCode: 200 };
-          };
-
-  EndSessionLambda:
-    Type: AWS::Lambda::Function
-    Properties:
-      Handler: index.handler
-      Runtime: nodejs18.x
-      Role: !GetAtt LambdaRole.Arn
-      Environment:
-        Variables:
-          WS_ENDPOINT: !Sub "${WebSocketApi}.execute-api.${AWS::Region}.amazonaws.com/prod"
-      Code:
-        ZipFile: |
-          const AWS = require("aws-sdk");
-          const ddb = new AWS.DynamoDB.DocumentClient();
-
-          exports.handler = async (event) => {
-            console.log("End session");
-
-            const session = await ddb.get({
-              TableName: "Sessions",
-              Key: { sessionId: "current" }
-            }).promise();
-
-            const votes = session.Item?.votes || {};
-
-            const winner = Object.entries(votes)
-              .sort((a, b) => b[1] - a[1])[0]?.[0] || "No votes";
-
-            const connections = await ddb.scan({ TableName: "Connections" }).promise();
-
-            const apigw = new AWS.ApiGatewayManagementApi({
-              endpoint: process.env.WS_ENDPOINT
-            });
-
-            const message = {
-              type: "sessionEnded",
-              winner
-            };
-
-            const postCalls = connections.Items.map(async ({ connectionId }) => {
-              try {
-                await apigw.postToConnection({
-                  ConnectionId: connectionId,
-                  Data: JSON.stringify(message)
-                }).promise();
-              } catch (err) {
-                console.log("Failed to send to", connectionId, err);
-              }
-            });
-
-            await Promise.all(postCalls);
-
-            return { statusCode: 200 };
-          };
-
-  ConnectIntegration:
-    Type: AWS::ApiGatewayV2::Integration
-    Properties:
-      ApiId: !Ref WebSocketApi
-      IntegrationType: AWS_PROXY
-      IntegrationUri: !GetAtt OnConnectLambda.Arn
-
-  DisconnectIntegration:
-    Type: AWS::ApiGatewayV2::Integration
-    Properties:
-      ApiId: !Ref WebSocketApi
-      IntegrationType: AWS_PROXY
-      IntegrationUri: !GetAtt OnDisconnectLambda.Arn
-
-  StartSessionIntegration:
-    Type: AWS::ApiGatewayV2::Integration
-    Properties:
-      ApiId: !Ref WebSocketApi
-      IntegrationType: AWS_PROXY
-      IntegrationUri: !GetAtt StartSessionLambda.Arn
-
-  VoteIntegration:
-    Type: AWS::ApiGatewayV2::Integration
-    Properties:
-      ApiId: !Ref WebSocketApi
-      IntegrationType: AWS_PROXY
-      IntegrationUri: !GetAtt VoteLambda.Arn
-
-  EndSessionIntegration:
-    Type: AWS::ApiGatewayV2::Integration
-    Properties:
-      ApiId: !Ref WebSocketApi
-      IntegrationType: AWS_PROXY
-      IntegrationUri: !GetAtt EndSessionLambda.Arn
-
-  DefaultIntegration:
-    Type: AWS::ApiGatewayV2::Integration
-    Properties:
-      ApiId: !Ref WebSocketApi
-      IntegrationType: MOCK
-
-  ConnectRoute:
-    Type: AWS::ApiGatewayV2::Route
-    Properties:
-      ApiId: !Ref WebSocketApi
-      RouteKey: "$connect"
-      Target: !Sub "integrations/${ConnectIntegration}"
-
-  DisconnectRoute:
-    Type: AWS::ApiGatewayV2::Route
-    Properties:
-      ApiId: !Ref WebSocketApi
-      RouteKey: "$disconnect"
-      Target: !Sub "integrations/${DisconnectIntegration}"
-
-  StartSessionRoute:
-    Type: AWS::ApiGatewayV2::Route
-    Properties:
-      ApiId: !Ref WebSocketApi
-      RouteKey: "startSession"
-      Target: !Sub "integrations/${StartSessionIntegration}"
-
-  VoteRoute:
-    Type: AWS::ApiGatewayV2::Route
-    Properties:
-      ApiId: !Ref WebSocketApi
-      RouteKey: "vote"
-      Target: !Sub "integrations/${VoteIntegration}"
-
-  EndSessionRoute:
-    Type: AWS::ApiGatewayV2::Route
-    Properties:
-      ApiId: !Ref WebSocketApi
-      RouteKey: "endSession"
-      Target: !Sub "integrations/${EndSessionIntegration}"
-
-  DefaultRoute:
-    Type: AWS::ApiGatewayV2::Route
-    Properties:
-      ApiId: !Ref WebSocketApi
-      RouteKey: "$default"
-      Target: !Sub "integrations/${DefaultIntegration}"
-
-  OnConnectLambdaPermission:
-    Type: AWS::Lambda::Permission
-    Properties:
-      Action: lambda:InvokeFunction
-      FunctionName: !Ref OnConnectLambda
-      Principal: apigateway.amazonaws.com
-      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${WebSocketApi}/*"
-
-  OnDisconnectLambdaPermission:
-    Type: AWS::Lambda::Permission
-    Properties:
-      Action: lambda:InvokeFunction
-      FunctionName: !Ref OnDisconnectLambda
-      Principal: apigateway.amazonaws.com
-      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${WebSocketApi}/*"
-
-  StartSessionLambdaPermission:
-    Type: AWS::Lambda::Permission
-    Properties:
-      Action: lambda:InvokeFunction
-      FunctionName: !Ref StartSessionLambda
-      Principal: apigateway.amazonaws.com
-      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${WebSocketApi}/*"
-
-  VoteLambdaPermission:
-    Type: AWS::Lambda::Permission
-    Properties:
-      Action: lambda:InvokeFunction
-      FunctionName: !Ref VoteLambda
-      Principal: apigateway.amazonaws.com
-      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${WebSocketApi}/*"
-
-  EndSessionLambdaPermission:
-    Type: AWS::Lambda::Permission
-    Properties:
-      Action: lambda:InvokeFunction
-      FunctionName: !Ref EndSessionLambda
-      Principal: apigateway.amazonaws.com
-      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${WebSocketApi}/*"
-
 Outputs:
-  WebSocketURL:
+  WebSocketUrl:
     Description: WebSocket URL
-    Value: !Sub "wss://${WebSocketApi}.execute-api.${AWS::Region}.amazonaws.com/prod"
+    Value: !Sub wss://${WebSocketApi}.execute-api.${AWS::Region}.amazonaws.com/prod

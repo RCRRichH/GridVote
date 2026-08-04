@@ -1,0 +1,234 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: GridVote WebSocket API + Lambdas + DynamoDB
+
+Resources:
+
+  WebSocketApi:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      ProtocolType: WEBSOCKET
+      RouteSelectionExpression: "$request.body.action"
+
+  WebSocketStage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      ApiId: !Ref WebSocketApi
+      StageName: prod
+      AutoDeploy: true
+
+  ConnectionsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      AttributeDefinitions:
+        - AttributeName: connectionId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: connectionId
+          KeyType: HASH
+      BillingMode: PAY_PER_REQUEST
+      TableName: Connections
+
+  TracksTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      AttributeDefinitions:
+        - AttributeName: trackName
+          AttributeType: S
+      KeySchema:
+        - AttributeName: trackName
+          KeyType: HASH
+      BillingMode: PAY_PER_REQUEST
+      TableName: Tracks
+
+  SessionsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      AttributeDefinitions:
+        - AttributeName: sessionId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: sessionId
+          KeyType: HASH
+      BillingMode: PAY_PER_REQUEST
+      TableName: Sessions
+
+  LambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: GridVotePolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:*
+                  - execute-api:ManageConnections
+                Resource: "*"
+
+  OnConnectLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: index.handler
+      Runtime: nodejs18.x
+      Role: !GetAtt LambdaRole.Arn
+      Code:
+        ZipFile: |
+          exports.handler = async (event) => {
+            console.log("Connected:", event.requestContext.connectionId);
+            return { statusCode: 200 };
+          };
+
+  OnDisconnectLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: index.handler
+      Runtime: nodejs18.x
+      Role: !GetAtt LambdaRole.Arn
+      Code:
+        ZipFile: |
+          exports.handler = async (event) => {
+            console.log("Disconnected:", event.requestContext.connectionId);
+            return { statusCode: 200 };
+          };
+
+  StartSessionLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: index.handler
+      Runtime: nodejs18.x
+      Role: !GetAtt LambdaRole.Arn
+      Environment:
+        Variables:
+          WS_ENDPOINT: !Sub "wss://${WebSocketApi}.execute-api.${AWS::Region}.amazonaws.com/prod"
+      Code:
+        ZipFile: |
+          exports.handler = async (event) => {
+            console.log("Start session");
+            return { statusCode: 200 };
+          };
+
+  VoteLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: index.handler
+      Runtime: nodejs18.x
+      Role: !GetAtt LambdaRole.Arn
+      Code:
+        ZipFile: |
+          exports.handler = async (event) => {
+            console.log("Vote received");
+            return { statusCode: 200 };
+          };
+
+  EndSessionLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: index.handler
+      Runtime: nodejs18.x
+      Role: !GetAtt LambdaRole.Arn
+      Environment:
+        Variables:
+          WS_ENDPOINT: !Sub "wss://${WebSocketApi}.execute-api.${AWS::Region}.amazonaws.com/prod"
+      Code:
+        ZipFile: |
+          exports.handler = async (event) => {
+            console.log("End session");
+            return { statusCode: 200 };
+          };
+
+  ConnectIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref WebSocketApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !GetAtt OnConnectLambda.Arn
+
+  DisconnectIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref WebSocketApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !GetAtt OnDisconnectLambda.Arn
+
+  StartSessionIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref WebSocketApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !GetAtt StartSessionLambda.Arn
+
+  VoteIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref WebSocketApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !GetAtt VoteLambda.Arn
+
+  EndSessionIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref WebSocketApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !GetAtt EndSessionLambda.Arn
+
+  DefaultIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref WebSocketApi
+      IntegrationType: MOCK
+      PayloadFormatVersion: "1.0"
+
+  ConnectRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref WebSocketApi
+      RouteKey: "$connect"
+      Target: !Sub "integrations/${ConnectIntegration}"
+
+  DisconnectRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref WebSocketApi
+      RouteKey: "$disconnect"
+      Target: !Sub "integrations/${DisconnectIntegration}"
+
+  StartSessionRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref WebSocketApi
+      RouteKey: "startSession"
+      Target: !Sub "integrations/${StartSessionIntegration}"
+
+  VoteRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref WebSocketApi
+      RouteKey: "vote"
+      Target: !Sub "integrations/${VoteIntegration}"
+
+  EndSessionRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref WebSocketApi
+      RouteKey: "endSession"
+      Target: !Sub "integrations/${EndSessionIntegration}"
+
+  DefaultRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref WebSocketApi
+      RouteKey: "$default"
+      Target: !Sub "integrations/${DefaultIntegration}"
+
+Outputs:
+  WebSocketURL:
+    Description: WebSocket URL
+    Value: !Sub "wss://${WebSocketApi}.execute-api.${AWS::Region}.amazonaws.com/prod"
